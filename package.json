@@ -1,0 +1,32 @@
+{
+  "name": "daintreehq.continue-session",
+  "version": "0.1.0",
+  "description": "Daintree plugin: continue a Codex session in Claude Code, or a Claude Code session in Codex.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/daintreehq/plugin-continue-session.git"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "validate": "daintree-plugin validate",
+    "package": "daintree-plugin package",
+    "check": "npm run typecheck && npm test && npm run validate"
+  },
+  "devDependencies": {
+    "@daintreehq/plugin-sdk": "file:toolchain/daintreehq-plugin-sdk-0.2.0.tgz",
+    "@daintreehq/plugin-vite": "file:toolchain/daintreehq-plugin-vite-0.2.0.tgz",
+    "@types/node": "^22.20.5",
+    "daintree-plugin": "file:toolchain/daintree-plugin-0.2.0.tgz",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.6",
+    "vitest": "^5.1.0"
+  }
+}

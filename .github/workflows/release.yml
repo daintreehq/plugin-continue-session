@@ -1,0 +1,96 @@
+name: Release
+
+# Pushing a tag `v{version}` publishes that version: a GitHub Release with the
+# packaged `.dntr` and its SHA-256 in `SHA256SUMS`. An existing release is never
+# overwritten, so a published asset URL keeps serving the bytes its digest names.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Check the tag against the manifest
+        id: version
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./plugin.json').name")
+          version=$(node -p "require('./plugin.json').version")
+          package_version=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ] || [ "$package_version" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME must be v{version} of both plugin.json ($version) and package.json ($package_version)"
+            exit 1
+          fi
+          notes=$(awk -v v="$version" '/^## / { found = ($2 == v); next } found' CHANGELOG.md)
+          if [ -z "${notes//[[:space:]]/}" ]; then
+            echo "::error::CHANGELOG.md has no '## $version' entry"
+            exit 1
+          fi
+          printf '%s\n' "$notes" > "$RUNNER_TEMP/release-notes.md"
+          echo "asset=$name-$version.dntr" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+
+      - name: Typecheck, test and validate
+        run: npm run check
+
+      - name: Package
+        run: npm run package
+
+      - name: Check the archive
+        env:
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          unzip -p "$ASSET" plugin.json > "$RUNNER_TEMP/plugin.json"
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            const archived = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/plugin.json', 'utf8'));
+            const source = JSON.parse(readFileSync('plugin.json', 'utf8'));
+            if (JSON.stringify(archived) !== JSON.stringify(source)) throw new Error('The archive carries a different plugin.json');
+            if ('v' + archived.version !== process.env.GITHUB_REF_NAME) throw new Error('The archive is version ' + archived.version);
+            console.log(archived.name + '@' + archived.version + ' declares ' + JSON.stringify(archived.capabilities));
+          "
+          unzip -Z1 "$ASSET"
+          # Loaded from the extracted archive, as the plugin worker loads it,
+          # below a package.json that makes plain .js files CommonJS.
+          root="$RUNNER_TEMP/installed"
+          mkdir -p "$root/plugin"
+          echo '{ "type": "commonjs" }' > "$root/package.json"
+          unzip -q "$ASSET" -d "$root/plugin"
+          main=$(node -p "require('./plugin.json').main")
+          node --input-type=module -e "
+            import { pathToFileURL } from 'node:url';
+            const m = await import(pathToFileURL(process.argv[1]).href);
+            if (typeof m.activate !== 'function') throw new Error(process.argv[1] + ' exports no activate()');
+          " "$root/plugin/$main"
+
+      - name: Compute the checksum
+        env:
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          sha256sum "$ASSET" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: gh release create "$GITHUB_REF_NAME" "$ASSET" SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"

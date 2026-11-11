@@ -1,0 +1,2 @@
+# The archive ships plugin.json, dist/ and the docs; the build toolchain stays here.
+toolchain/
