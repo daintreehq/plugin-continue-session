@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- A conversion that skips records says so. Records that are malformed or over 8 MB can't be indexed, and nothing used to say they were missing from search: the finished conversion now leaves an inbox entry with the count, and **Converted sessions…** shows it beside the session.
+
 ## 0.1.0
 
 The first release from this repository. The plugin was developed in [`daintreehq/daintree`](https://github.com/daintreehq/daintree) as `plugins/sample/continue-session` and moves here unchanged, except:

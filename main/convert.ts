@@ -10,6 +10,11 @@ import { parseRecord, type SessionAgentId } from "./sessionRecords.js";
  */
 export const MAX_RECORD_BYTES = 8 * 1024 * 1024;
 
+/** "1 record", "3 records": what a conversion skipped, for the messages that say so. */
+export function recordCount(count: number): string {
+  return `${count} ${count === 1 ? "record" : "records"}`;
+}
+
 export interface ConvertInput {
   readonly id: string;
   readonly agentId: SessionAgentId;

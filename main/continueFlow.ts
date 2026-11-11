@@ -1,7 +1,7 @@
 import type { PluginHostApi } from "@daintreehq/plugin-sdk";
 import type { ConversionRecord } from "./catalog.js";
 import { currentProjectId, MANIFEST_NAME, type PluginContext } from "./context.js";
-import { convertSession, SessionMismatchError } from "./convert.js";
+import { convertSession, MAX_RECORD_BYTES, recordCount, SessionMismatchError } from "./convert.js";
 import { AGENT_LABELS, buildHandoffPrompt } from "./handoff.js";
 import { pruneRemovedProjects } from "./retention.js";
 import type { SessionAgentId } from "./sessionRecords.js";
@@ -160,7 +160,15 @@ export async function continueFromPane(
     ctx.running.delete(controller);
   }
 
-  await task.finish({ outcome: "succeeded" });
+  // Unreadable records would otherwise go missing from search unannounced.
+  await task.finish(
+    record.skippedLines > 0
+      ? {
+          outcome: "succeeded",
+          message: `Converted. The index leaves out ${recordCount(record.skippedLines)} that couldn't be read: malformed, or over ${MAX_RECORD_BYTES / (1024 * 1024)} MB.`,
+        }
+      : { outcome: "succeeded" }
+  );
   await pruneRemovedProjects(ctx, projectId).catch(() => undefined);
   return launchConversion(ctx, record, prompt);
 }

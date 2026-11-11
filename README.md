@@ -9,7 +9,7 @@ It is an installed plugin, not part of Daintree itself, and the end-to-end test 
 Needs Daintree 0.49.0 or later. Take a versioned asset URL from [Releases](https://github.com/daintreehq/plugin-continue-session/releases), for example:
 
 ```
-https://github.com/daintreehq/plugin-continue-session/releases/download/v0.1.0/daintreehq.continue-session-0.1.0.dntr
+https://github.com/daintreehq/plugin-continue-session/releases/download/v0.1.1/daintreehq.continue-session-0.1.1.dntr
 ```
 
 - In Daintree: **Settings → Plugins → Plugin manager → Install plugin → Install from URL**, and paste it.
@@ -45,7 +45,7 @@ The search tool reaches an agent only where the plugin's agent tools are on (**P
 ## Limits
 
 - Codex and Claude Code only, on macOS and Linux, for local panes. A Claude Code session the CLI switched to by itself (`/clear`, a fork) isn't seen; Daintree reports the session it launched.
-- Tool inputs and outputs are indexed up to 16,000 characters each, and records over 8 MB are skipped and counted.
+- Tool inputs and outputs are indexed up to 16,000 characters each. Records that are malformed or over 8 MB are skipped; the finished conversion says how many, and so does **Converted sessions…**.
 - An index is deleted when its project is no longer registered, checked the next time the plugin converts a session or lists them: the plugin isn't told when a project is removed.
 
 ## Developing

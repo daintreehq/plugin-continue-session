@@ -1,6 +1,6 @@
 {
   "name": "daintreehq.continue-session",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "displayName": "Continue Session",
   "description": "Continue a Codex session in Claude Code, or a Claude Code session in Codex. The old session is indexed read-only on this machine, and the new agent starts in the same worktree with a short hand-off and one tool to search the old conversation.",
   "tagline": "Carry a Codex or Claude Code session over to the other CLI",

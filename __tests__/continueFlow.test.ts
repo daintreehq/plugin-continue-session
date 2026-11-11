@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionDispatchResult, PluginMcpCaller } from "@daintreehq/plugin-sdk";
@@ -151,8 +151,28 @@ describe("Continue in another agent", () => {
     expect(prompt).toContain("Added keymap.linux.test.ts");
     expect(prompt).not.toContain("<environment_context>");
 
-    expect(host.startedTasks[0]?.state).toBe("succeeded");
+    // A session read whole files nothing in the inbox.
+    expect(host.startedTasks[0]?.result).toEqual({ outcome: "succeeded" });
+    expect(host.notifications).toEqual([]);
     expect(hashOf(scenario.sourcePath)).toBe(before);
+  });
+
+  it("says how many records the index leaves out", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    appendFileSync(scenario.sourcePath, '{"type":"response_item","payload":\n[]\n');
+    host.simulateConfirmResponse(true);
+
+    expect(await clickContinue(host)).toMatchObject({ status: "launched" });
+
+    const result = host.startedTasks[0]?.result;
+    expect(result).toMatchObject({ outcome: "succeeded" });
+    expect(result && "message" in result ? result.message : "").toMatch(
+      /^Converted\. The index leaves out 2 records that couldn't be read/
+    );
+    expect(host.notifications.map((entry) => entry.options)).toEqual([
+      expect.objectContaining({ delivery: "passive", title: "Converting the Codex session" }),
+    ]);
   });
 
   it("lets only the continuing agent search the session", async () => {
@@ -346,7 +366,29 @@ describe("Converted sessions", () => {
     expect(items[0]).toMatchObject({ id: "id-1", label: "Codex → Claude Code" });
     expect(items[0]!.description).toMatch(/KB$/);
     expect(items.map((item) => item.id)).toEqual(["id-1", "share", "delete-all"]);
+    expect(items[0]!.detail).toBe("Searchable by the agent that continued it");
   });
+
+  it.each([
+    { launched: true, detail: "Searchable by the agent that continued it · 1 record skipped" },
+    { launched: false, detail: "Not continued yet · 1 record skipped" },
+  ])(
+    "says when a session's index leaves records out (launched: $launched)",
+    async ({ launched, detail }) => {
+      const scenario = await setUp();
+      appendFileSync(scenario.sourcePath, "not json\n");
+      if (!launched) {
+        scenario.launchResult = () =>
+          ok({ launched: false, terminalId: null, spawnStatus: "missing-cli" });
+      }
+      scenario.host.simulateConfirmResponse(true);
+      await clickContinue(scenario.host);
+
+      await manage(scenario.host);
+
+      expect(scenario.host.showQuickPickCalls[0]!.items[0]!.detail).toBe(detail);
+    }
+  );
 
   it("shares the project's sessions with every agent in it after a confirm", async () => {
     const { host } = await converted();

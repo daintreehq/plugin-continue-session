@@ -1,6 +1,6 @@
 {
   "name": "daintreehq.continue-session",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Daintree plugin: continue a Codex session in Claude Code, or a Claude Code session in Codex.",
   "license": "Apache-2.0",
   "private": true,

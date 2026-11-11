@@ -2,6 +2,7 @@ import type { PluginQuickPickItem } from "@daintreehq/plugin-sdk";
 import type { ConversionRecord } from "./catalog.js";
 import { currentProjectId, MANIFEST_NAME, type PluginContext } from "./context.js";
 import { launchById } from "./continueFlow.js";
+import { recordCount } from "./convert.js";
 import { AGENT_LABELS } from "./handoff.js";
 import { deleteConversions, pruneRemovedProjects } from "./retention.js";
 
@@ -36,10 +37,7 @@ export async function manageConversions(ctx: PluginContext, args: unknown): Prom
     id: record.id,
     label: `${AGENT_LABELS[record.sourceAgent]} → ${AGENT_LABELS[record.targetAgent]}`,
     description: `${new Date(record.createdAt).toLocaleString()} · ${formatBytes(sizes[index] ?? null)}`,
-    detail:
-      record.terminalIds.length > 0
-        ? "Searchable by the agent that continued it"
-        : "Not continued yet",
+    detail: describeConversion(record),
   }));
   items.push(
     shared
@@ -133,6 +131,14 @@ async function reportDeletion(ctx: PluginContext, result: { failed: number }): P
       { id: "open", label: "Converted sessions", actionId: `${MANIFEST_NAME}.manage`, args: {} },
     ],
   });
+}
+
+function describeConversion(record: ConversionRecord): string {
+  const reach =
+    record.terminalIds.length > 0
+      ? "Searchable by the agent that continued it"
+      : "Not continued yet";
+  return record.skippedLines > 0 ? `${reach} · ${recordCount(record.skippedLines)} skipped` : reach;
 }
 
 function readProjectId(args: unknown): string | null {
