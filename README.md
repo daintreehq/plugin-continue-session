@@ -17,6 +17,8 @@ https://github.com/daintreehq/plugin-continue-session/releases/download/v0.1.1/d
 
 The release's `SHA256SUMS` asset holds the archive's digest. Installing a newer release's URL replaces the installed version.
 
+Current Daintree builds can't follow the redirect GitHub answers a release URL with ([daintreehq/daintree#16855](https://github.com/daintreehq/daintree/issues/16855)), so a URL install fails with **Couldn't download the plugin from that URL.** Until that's fixed, download the `.dntr`, check it against `SHA256SUMS` (`shasum -a 256 -c SHA256SUMS`), and install the file: **Install plugin → Install from file**, or `npx daintree-plugin install ./daintreehq.continue-session-0.1.1.dntr`.
+
 The plugin declares `fs:user-data-read` (it reads the session file Daintree observed) and `mcp:expose` (it serves the search tool to agents). Like every Daintree plugin it runs unsandboxed, with full Node.js privileges, whatever it declares.
 
 ## Using it
