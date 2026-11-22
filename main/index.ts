@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { PluginActionContribution, PluginHostApi } from "@daintreehq/plugin-sdk";
+import {
+  CONTEXT_MENU_AVAILABILITY_CHANNEL,
+  type PluginActionContribution,
+  type PluginHostApi,
+} from "@daintreehq/plugin-sdk";
 import manifest from "../plugin.json" with { type: "json" };
+import { continueAvailability } from "./availability.js";
 import { Catalog } from "./catalog.js";
 import type { PluginContext } from "./context.js";
 import { continueFromPane, launchById } from "./continueFlow.js";
@@ -14,9 +19,12 @@ import { createSearchTool } from "./search.js";
 /**
  * Continue Session (#16097): carries a Codex session over to Claude Code, or
  * a Claude Code session over to Codex. Core's `terminal.sessionFile.get` says
- * which file the pane's agent is writing; this plugin reads it once into a
- * local full-text index, starts the other CLI in the same worktree with a
- * mechanical hand-off, and serves one MCP tool that searches the index.
+ * which file the pane's or assistant's agent is writing; this plugin reads it
+ * once into a local full-text index, starts the other CLI where the session
+ * ran (the same worktree, or a new session of the project's assistant) with a
+ * mechanical hand-off, and serves one MCP tool that searches the index. The
+ * global assistant is handed no plugin tools, so its successor gets the
+ * hand-off alone and Daintree asks the person before replacing its run.
  *
  * Nothing is read until the user asks for a conversion, and the source file
  * is only ever opened read-only.
@@ -38,17 +46,24 @@ export async function activateWith(
     store: new IndexStore(join(options.dataDir, "sessions")),
     newId: options.newId,
     running: new Set(),
+    pendingAssistantGrants: new Map(),
   };
 
   await host.registerAction(declaredCommand("continue"), (args) => continueFromPane(ctx, args));
   await host.registerAction(declaredCommand("launch"), (args) => launchById(ctx, args));
   await host.registerAction(declaredCommand("manage"), (args) => manageConversions(ctx, args));
+  // Greys out "Continue in another agent…" with the reason when the session
+  // file can't be located, instead of failing once it is picked.
+  await host.registerHandler(CONTEXT_MENU_AVAILABILITY_CHANNEL, (_ipc, payload) =>
+    continueAvailability(host, payload)
+  );
 
   const disposeTools = await host.mcp.registerTools("sessions", {
     [SEARCH_TOOL_NAME]: createSearchTool({
       catalog: ctx.catalog,
       store: ctx.store,
       log: (message) => host.logger.warn(message),
+      assistantStarting: () => new Set(ctx.pendingAssistantGrants.keys()),
     }),
   });
 
@@ -59,6 +74,7 @@ export async function activateWith(
   return () => {
     for (const controller of ctx.running) controller.abort();
     ctx.running.clear();
+    ctx.pendingAssistantGrants.clear();
     disposeTools();
   };
 }

@@ -1,8 +1,13 @@
 import type { PluginHostApi } from "@daintreehq/plugin-sdk";
 import type { SessionAgentId } from "./sessionRecords.js";
 
+/** Where the continuing agent runs: a pane in the session's worktree, or a project assistant session. */
+export type ContinuedIn = "worktree" | "assistant";
+
 export interface ConversionRecord {
   readonly id: string;
+  /** Absent on sessions converted before assistants could be continued: those are `worktree`. */
+  readonly continuedIn?: ContinuedIn;
   readonly projectId: string;
   readonly worktreeId: string | null;
   readonly cwd: string;
@@ -23,6 +28,12 @@ export interface ConversionRecord {
    * if it doesn't, without touching another launch's.
    */
   readonly terminalIds: readonly string[];
+  /**
+   * Set once an assistant session was started to continue it. A project
+   * assistant session's terminal isn't known before it starts, so the grant is
+   * to the project's Daintree Assistant: any of its sessions can search it.
+   */
+  readonly assistantGrant?: boolean;
 }
 
 const CONVERSIONS_KEY = "conversions";
@@ -47,9 +58,11 @@ export class Catalog {
       .filter(isRecord)
       .map((record) => ({
         ...record,
+        continuedIn: record.continuedIn === "assistant" ? "assistant" : "worktree",
         terminalIds: Array.isArray(record.terminalIds)
           ? record.terminalIds.filter((id): id is string => typeof id === "string")
           : [],
+        assistantGrant: record.assistantGrant === true,
       }));
   }
 
@@ -80,6 +93,14 @@ export class Catalog {
       const kept = current.terminalIds.filter((candidate) => candidate !== terminalId);
       if (replacement && !kept.includes(replacement)) kept.push(replacement);
       all[id] = { ...current, terminalIds: kept };
+    });
+  }
+
+  /** Lets the project's Daintree Assistant search the session, once a start for it succeeded. */
+  grantAssistant(id: string): Promise<void> {
+    return this.mutate((all) => {
+      const current = all[id];
+      if (current) all[id] = { ...current, assistantGrant: true };
     });
   }
 

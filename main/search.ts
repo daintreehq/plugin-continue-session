@@ -19,21 +19,23 @@ export const RESULT_BUDGET_BYTES = 200 * 1024;
 /**
  * Who may search a converted session. By default only the agent launched to
  * continue it: the caller's credential was minted for that terminal in that
- * project. A project that shares its converted sessions lets every agent in
- * it search them, and its agents can also search the sessions of every other
- * project that shares; a project that doesn't share is never searched from
- * outside, whatever another project has turned on.
+ * project, or, for a session continued in a project assistant session, for
+ * that project's Daintree Assistant. A project that shares its converted
+ * sessions lets every agent in it search them, and its agents can also search
+ * the sessions of every other project that shares; a project that doesn't
+ * share is never searched from outside, whatever another project has turned on.
  *
  * `caller` is the host's provenance of the credential, never anything the
  * agent sent.
  */
 export function canSearch(
   record: ConversionRecord,
-  caller: Pick<PluginMcpCaller, "projectId" | "terminalId">,
+  caller: Pick<PluginMcpCaller, "projectId" | "terminalId" | "consumer">,
   sharedProjects: ReadonlySet<string>
 ): boolean {
-  if (record.projectId === caller.projectId && record.terminalIds.includes(caller.terminalId)) {
-    return true;
+  if (record.projectId === caller.projectId) {
+    if (record.terminalIds.includes(caller.terminalId)) return true;
+    if (record.assistantGrant === true && caller.consumer === "assistant") return true;
   }
   return sharedProjects.has(caller.projectId) && sharedProjects.has(record.projectId);
 }
@@ -82,6 +84,12 @@ export function createSearchTool(deps: {
   catalog: Catalog;
   store: IndexStore;
   log: (message: string) => void;
+  /**
+   * The conversions an assistant session start is in flight for. Read before
+   * the catalog: a start commits its grant before it lets go of its hold, so
+   * one of the two reads always sees it.
+   */
+  assistantStarting?: () => ReadonlySet<string>;
 }): PluginMcpToolDefinition {
   return {
     description:
@@ -101,12 +109,19 @@ export function createSearchTool(deps: {
       const limit = typeof args.limit === "number" ? args.limit : DEFAULT_LIMIT;
       const only = typeof args.convertedSessionId === "string" ? args.convertedSessionId : null;
 
+      const starting = deps.assistantStarting?.() ?? new Set<string>();
       const [records, shared] = await Promise.all([
         deps.catalog.list(),
         deps.catalog.sharedProjects(),
       ]);
       const visible = records
-        .filter((record) => canSearch(record, caller, shared))
+        .filter((record) =>
+          canSearch(
+            starting.has(record.id) ? { ...record, assistantGrant: true } : record,
+            caller,
+            shared
+          )
+        )
         .filter((record) => only === null || record.id === only)
         .sort((a, b) => b.createdAt - a.createdAt)
         .slice(0, MAX_SESSIONS);

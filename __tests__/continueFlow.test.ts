@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ActionDispatchResult, PluginMcpCaller } from "@daintreehq/plugin-sdk";
@@ -24,6 +24,16 @@ interface Scenario {
   sessionFile: Record<string, unknown>;
   launchResult: (args: Record<string, unknown>) => ActionDispatchResult;
   projects: string[];
+  assistantStarts: Record<string, unknown>[];
+  /** Terminal ids `terminal.sessionFile.get` was asked about, in order. */
+  lookups: string[];
+  /** Answers per terminal id, over `sessionFile`. */
+  sessionFiles: Record<string, ActionDispatchResult>;
+  assistantResult: () => ActionDispatchResult;
+  replacements: Record<string, unknown>[];
+  replaceResult: () => ActionDispatchResult;
+  /** Replaces `assistantResult` when set, for a start that waits or looks around first. */
+  onAssistantStart?: () => Promise<ActionDispatchResult>;
   /** What the pane's own record says its project is; unset, the record names none. */
   terminalProjectId?: string;
 }
@@ -52,6 +62,12 @@ async function setUp(): Promise<Scenario> {
     launchResult: (args: Record<string, unknown>) =>
       ok({ launched: true, terminalId: args.requestedId, spawnStatus: null }),
     projects: ["p1", "p2"],
+    assistantStarts: [] as Record<string, unknown>[],
+    lookups: [] as string[],
+    sessionFiles: {} as Record<string, ActionDispatchResult>,
+    assistantResult: () => ok({ outcome: "started" }),
+    replacements: [] as Record<string, unknown>[],
+    replaceResult: () => ok({ outcome: "awaiting-confirmation" }),
   } as Omit<Scenario, "host">;
   const host = createMockHost({
     pluginId: PLUGIN_ID,
@@ -77,10 +93,19 @@ async function setUp(): Promise<Scenario> {
             ...(scenario.terminalProjectId ? { projectId: scenario.terminalProjectId } : {}),
           });
         case "terminal.sessionFile.get":
-          return ok(scenario.sessionFile);
+          scenario.lookups.push(String(input.terminalId));
+          return scenario.sessionFiles[String(input.terminalId)] ?? ok(scenario.sessionFile);
         case "agent.launch":
           scenario.launches.push(input);
           return scenario.launchResult(input);
+        case "help.newSessionWithAgent":
+          scenario.assistantStarts.push(input);
+          return scenario.onAssistantStart
+            ? scenario.onAssistantStart()
+            : scenario.assistantResult();
+        case "help.replaceGlobalAssistant":
+          scenario.replacements.push(input);
+          return scenario.replaceResult();
         default:
           return {
             ok: false,
@@ -106,8 +131,42 @@ function searchTool(host: MockHost) {
   return roster!.tools.search_converted!;
 }
 
-function caller(projectId: string, terminalId: string): PluginMcpCaller {
-  return { credentialId: "cred", projectId, terminalId };
+function caller(projectId: string, terminalId: string, consumer?: "assistant"): PluginMcpCaller {
+  return { credentialId: "cred", projectId, terminalId, ...(consumer ? { consumer } : {}) };
+}
+
+/** A project assistant session's menu, as the Assistant panel dispatches it. */
+async function clickOnProjectAssistant(
+  host: MockHost,
+  overrides: Record<string, unknown> = {}
+): Promise<unknown> {
+  const action = host.registeredActions.find((entry) => entry.descriptor.id === "continue");
+  return action!.handler({
+    assistantScope: "project",
+    projectId: "p1",
+    slot: 2,
+    terminalId: "assistant-term",
+    agentId: "codex",
+    ...overrides,
+  });
+}
+
+/** The global assistant's More actions menu. */
+async function clickOnGlobalAssistant(host: MockHost): Promise<unknown> {
+  const action = host.registeredActions.find((entry) => entry.descriptor.id === "continue");
+  return action!.handler({
+    assistantScope: "global",
+    terminalId: "global-term",
+    incarnation: 3,
+    agentId: "codex",
+  });
+}
+
+async function availability(host: MockHost, request: Record<string, unknown>): Promise<unknown> {
+  const entry = host.registeredHandlers.find(
+    (handler) => handler.channel === "@daintree/context-menu-availability"
+  );
+  return entry!.handler({} as never, { availability: "continue", ...request });
 }
 
 function hashOf(path: string): string {
@@ -445,5 +504,394 @@ describe("Converted sessions", () => {
     scenario.projects = ["p3"];
     await manage(host, "p3");
     expect(indexes()).toEqual(["id-3.db"]);
+  });
+});
+
+describe("Continue a project assistant session", () => {
+  type Found = { sessions: { convertedSessionId: string; sessionFile: string; hits: unknown[] }[] };
+
+  /** The session ids the project's assistant finds "keymap" in; [] when it may search none. */
+  async function assistantFinds(host: MockHost, projectId = "p1"): Promise<string[]> {
+    try {
+      const found = (await searchTool(host).execute(
+        { query: "keymap" },
+        caller(projectId, "any-assistant-lane", "assistant"),
+        new AbortController().signal
+      )) as Found;
+      return found.sessions
+        .filter((session) => session.hits.length > 0)
+        .map((session) => session.convertedSessionId);
+    } catch (error) {
+      if (String(error).includes("No converted session is searchable")) return [];
+      throw error;
+    }
+  }
+
+  it("converts the session and starts the other CLI as a new assistant session with the hand-off", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    host.simulateConfirmResponse(true);
+
+    const outcome = await clickOnProjectAssistant(host);
+
+    expect(outcome).toEqual({ status: "launched", conversionId: "id-1" });
+    expect(scenario.lookups).toEqual(["assistant-term"]);
+    expect(host.showConfirmCalls[0]?.options.message).toContain(
+      "starts as a new assistant session in this project"
+    );
+    expect(scenario.launches).toEqual([]);
+    expect(scenario.assistantStarts).toHaveLength(1);
+    const start = scenario.assistantStarts[0]!;
+    expect(Object.keys(start).sort()).toEqual(["agentId", "prompt"]);
+    expect(start.agentId).toBe("claude");
+    const prompt = String(start.prompt);
+    expect(prompt).toContain("ran as this project's Daintree Assistant");
+    expect(prompt).toContain("Now add a test for the Linux keymap.");
+    expect(host.notifications).toEqual([]);
+  });
+
+  it("does nothing when the user declines", async () => {
+    const scenario = await setUp();
+    scenario.host.simulateConfirmResponse(false);
+    expect(await clickOnProjectAssistant(scenario.host)).toEqual({ status: "declined" });
+    expect(scenario.host.startedTasks).toEqual([]);
+    expect(scenario.assistantStarts).toEqual([]);
+  });
+
+  it("lets the project's assistant search from its first turn, and no worker or other project", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    let duringStart: string[] = [];
+    scenario.onAssistantStart = async () => {
+      duringStart = await assistantFinds(host);
+      return ok({ outcome: "started" });
+    };
+    host.simulateConfirmResponse(true);
+    await clickOnProjectAssistant(host);
+    const signal = new AbortController().signal;
+
+    expect(duringStart).toEqual(["id-1"]);
+    expect(await assistantFinds(host)).toEqual(["id-1"]);
+    expect(await assistantFinds(host, "p2")).toEqual([]);
+    await expect(
+      searchTool(host).execute({ query: "keymap" }, caller("p1", "a-worker-pane"), signal)
+    ).rejects.toThrow(/No converted session is searchable/);
+  });
+
+  it("takes the assistant's grant back and offers a retry when every tab is in use", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    let duringStart: string[] = [];
+    scenario.onAssistantStart = async () => {
+      duringStart = await assistantFinds(host);
+      return ok({ outcome: "lanes-full" });
+    };
+    host.simulateConfirmResponse(true);
+
+    const outcome = (await clickOnProjectAssistant(host)) as { status: string; reason: string };
+
+    expect(outcome.status).toBe("not-launched");
+    expect(outcome.reason).toContain("Every assistant session tab is in use");
+    expect(duringStart).toEqual(["id-1"]);
+    expect(await assistantFinds(host)).toEqual([]);
+    expect(host.notifications[0]?.options.actions?.[0]).toMatchObject({
+      actionId: `${PLUGIN_ID}.launch`,
+      args: { conversionId: "id-1" },
+    });
+
+    // The retry starts an assistant session again, never a pane, and grants search.
+    scenario.onAssistantStart = undefined;
+    const launch = host.registeredActions.find((entry) => entry.descriptor.id === "launch");
+    expect(await launch!.handler({ conversionId: "id-1" })).toEqual({
+      status: "launched",
+      conversionId: "id-1",
+    });
+    expect(scenario.assistantStarts).toHaveLength(2);
+    expect(scenario.launches).toEqual([]);
+    expect(await assistantFinds(host)).toEqual(["id-1"]);
+  });
+
+  it("keeps an earlier start's grant when a later one fails", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    host.simulateConfirmResponse(true);
+    await clickOnProjectAssistant(host);
+    scenario.assistantResult = () => ok({ outcome: "unavailable" });
+    const launch = host.registeredActions.find((entry) => entry.descriptor.id === "launch");
+
+    expect(await launch!.handler({ conversionId: "id-1" })).toMatchObject({
+      status: "not-launched",
+    });
+    expect(scenario.assistantStarts).toHaveLength(2);
+    expect(await assistantFinds(host)).toEqual(["id-1"]);
+  });
+
+  it("never lets a start that fails withdraw one that succeeded beside it", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    scenario.assistantResult = () => ok({ outcome: "lanes-full" });
+    host.simulateConfirmResponse(true);
+    await clickOnProjectAssistant(host);
+    expect(await assistantFinds(host)).toEqual([]);
+
+    // Two starts at once: the first fails after the second succeeded.
+    let failFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => (failFirst = resolve));
+    let calls = 0;
+    scenario.onAssistantStart = async () => {
+      calls += 1;
+      if (calls === 1) {
+        await firstHeld;
+        return ok({ outcome: "lanes-full" });
+      }
+      return ok({ outcome: "started" });
+    };
+    const launch = host.registeredActions.find((entry) => entry.descriptor.id === "launch")!;
+    const first = launch.handler({ conversionId: "id-1" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await launch.handler({ conversionId: "id-1" })).toMatchObject({ status: "launched" });
+    failFirst();
+    expect(await first).toMatchObject({ status: "not-launched" });
+
+    expect(await assistantFinds(host)).toEqual(["id-1"]);
+  });
+
+  it("keeps the grant and offers no blind retry when Daintree doesn't answer in time", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    scenario.assistantResult = () =>
+      ({
+        ok: false,
+        error: {
+          code: "EXECUTION_ERROR",
+          message: "Plugin action dispatch timed out: help.newSessionWithAgent",
+        },
+      }) as ActionDispatchResult;
+    host.simulateConfirmResponse(true);
+
+    expect(await clickOnProjectAssistant(host)).toMatchObject({ status: "not-launched" });
+
+    expect(await assistantFinds(host)).toEqual(["id-1"]);
+    expect(host.notifications.filter((entry) => entry.options.severity === "error")).toEqual([]);
+    expect(host.shownToasts.at(-1)?.message).toContain("didn't answer in time");
+  });
+
+  it("treats a dispatch the host stopped answering like one that timed out", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    scenario.onAssistantStart = async () => {
+      throw Object.assign(new Error("main stopped answering"), { code: "TIMEOUT" });
+    };
+    host.simulateConfirmResponse(true);
+
+    expect(await clickOnProjectAssistant(host)).toMatchObject({ status: "not-launched" });
+
+    expect(await assistantFinds(host)).toEqual(["id-1"]);
+    expect(host.shownToasts.at(-1)?.message).toContain("didn't answer in time");
+  });
+
+  it("refuses a session from a project that isn't in front, looking nothing up", async () => {
+    const scenario = await setUp();
+    const outcome = (await clickOnProjectAssistant(scenario.host, { projectId: "p2" })) as {
+      status: string;
+    };
+    expect(outcome.status).toBe("unavailable");
+    expect(scenario.lookups).toEqual([]);
+    expect(scenario.host.showConfirmCalls).toEqual([]);
+    expect(scenario.host.startedTasks).toEqual([]);
+  });
+
+  it("refuses a session whose terminal isn't up yet, looking nothing up", async () => {
+    const scenario = await setUp();
+    const action = scenario.host.registeredActions.find(
+      (entry) => entry.descriptor.id === "continue"
+    );
+    // As the panel dispatches a lane with no terminal: the field is left out.
+    const outcome = (await action!.handler({
+      assistantScope: "project",
+      projectId: "p1",
+      slot: 0,
+      agentId: "codex",
+    })) as { status: string; reason: string };
+    expect(outcome).toMatchObject({ status: "unavailable" });
+    expect(outcome.reason).toContain("hasn't started yet");
+    expect(scenario.lookups).toEqual([]);
+  });
+
+  it("lists an assistant conversion by whether a start succeeded", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    host.simulateConfirmResponse(true);
+    await clickOnProjectAssistant(host);
+    scenario.assistantResult = () => ok({ outcome: "lanes-full" });
+    await clickOnProjectAssistant(host);
+    const manage = host.registeredActions.find((entry) => entry.descriptor.id === "manage");
+    await manage!.handler({ projectId: "p1" });
+    const details = Object.fromEntries(
+      host.showQuickPickCalls[0]!.items.map((item) => [item.id, item.detail])
+    );
+    expect(details["id-1"]).toBe("Searchable by this project's assistant");
+    expect(details["id-2"]).toBe("Not continued yet");
+  });
+});
+
+describe("Continue the global assistant", () => {
+  it("asks Daintree to replace the clicked session from a hand-off, keeping nothing", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    const before = hashOf(scenario.sourcePath);
+
+    const outcome = await clickOnGlobalAssistant(host);
+
+    expect(outcome).toEqual({ status: "awaiting-confirmation" });
+    expect(scenario.lookups).toEqual(["global-term"]);
+    // Daintree's own dialog asks; the plugin doesn't ask first.
+    expect(host.showConfirmCalls).toEqual([]);
+    expect(scenario.replacements).toHaveLength(1);
+    const asked = scenario.replacements[0]!;
+    expect(asked.agentId).toBe("claude");
+    expect(asked.terminalId).toBe("global-term");
+    const prompt = String(asked.prompt);
+    expect(prompt).toContain("ran as the global Daintree Assistant");
+    expect(prompt).toContain("Now add a test for the Linux keymap.");
+    expect(prompt).toContain(scenario.sourcePath);
+    expect(prompt).not.toContain("search_converted");
+    expect(host.startedTasks[0]?.result).toEqual({ outcome: "succeeded" });
+    expect(await host.storage.get("conversions")).toBeUndefined();
+    // No index: not even its folder.
+    expect(existsSync(scenario.dataDir)).toBe(false);
+    expect(hashOf(scenario.sourcePath)).toBe(before);
+  });
+
+  it("says why when Daintree won't ask", async () => {
+    const scenario = await setUp();
+    scenario.replaceResult = () => ok({ outcome: "unavailable" });
+
+    const outcome = (await clickOnGlobalAssistant(scenario.host)) as {
+      status: string;
+      reason: string;
+    };
+
+    expect(scenario.replacements).toHaveLength(1);
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.reason).toContain("Only the session that coordinates");
+    expect(scenario.host.shownToasts[0]?.message).toContain("Can't continue this session.");
+  });
+
+  it("passes on Daintree's own refusal rather than guessing at one", async () => {
+    const scenario = await setUp();
+    scenario.replaceResult = () =>
+      ({
+        ok: false,
+        error: { code: "VALIDATION_ERROR", message: "A hand-off can't hold control characters" },
+      }) as ActionDispatchResult;
+
+    const outcome = (await clickOnGlobalAssistant(scenario.host)) as { reason: string };
+
+    expect(outcome.reason).toContain("A hand-off can't hold control characters");
+    expect(outcome.reason).not.toContain("Only the session that coordinates");
+  });
+
+  it("asks nothing and reads nothing when the session file isn't known", async () => {
+    const scenario = await setUp();
+    scenario.sessionFile = { status: "unknown", reason: "not-observed" };
+    const outcome = (await clickOnGlobalAssistant(scenario.host)) as {
+      status: string;
+      reason: string;
+    };
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome.reason).toContain("The session file wasn't seen");
+    expect(scenario.host.startedTasks).toEqual([]);
+    expect(scenario.replacements).toEqual([]);
+  });
+});
+
+describe("The menu item's availability", () => {
+  it("is available when the session file is observed, looking up the session clicked", async () => {
+    const scenario = await setUp();
+    const { host } = scenario;
+    expect(await availability(host, { location: "terminal", panelId: "pane-codex" })).toBeNull();
+    expect(
+      await availability(host, {
+        location: "assistant",
+        assistantScope: "global",
+        terminalId: "global-term",
+        agentId: "codex",
+      })
+    ).toBeNull();
+    expect(
+      await availability(host, {
+        location: "assistant",
+        assistantScope: "project",
+        projectId: "p1",
+        terminalId: "assistant-term",
+        agentId: "codex",
+      })
+    ).toBeNull();
+    expect(scenario.lookups).toEqual(["pane-codex", "global-term", "assistant-term"]);
+  });
+
+  it("names each unknown session file's own short reason", async () => {
+    const scenario = await setUp();
+    const ask = async (reason: string) => {
+      scenario.sessionFile = { status: "unknown", reason };
+      return availability(scenario.host, { location: "terminal", panelId: "pane-codex" });
+    };
+    const reasons = [
+      await ask("not-observed"),
+      await ask("remote-pane"),
+      await ask("a-reason-this-plugin-has-never-heard-of"),
+    ];
+    expect(reasons).toEqual([
+      "Session file not seen yet, try again shortly",
+      "Runs on a remote host",
+      "The session file isn't known yet",
+    ]);
+    for (const reason of reasons) {
+      expect(String(reason).length).toBeLessThanOrEqual(120);
+      expect(String(reason).endsWith(".")).toBe(false);
+    }
+  });
+
+  it("answers an assistant on another agent, one not started, and one outside a project without a lookup", async () => {
+    const scenario = await setUp();
+    const project = { location: "assistant", assistantScope: "project", projectId: "p1" };
+    expect(
+      await availability(scenario.host, { ...project, terminalId: "t", agentId: "antigravity" })
+    ).toBe("Only Codex and Claude Code sessions can continue");
+    expect(await availability(scenario.host, project)).toBe("The session hasn't started yet");
+    // A scratch workspace's assistant: no project is in front.
+    scenario.front.projectId = null;
+    expect(
+      await availability(scenario.host, {
+        ...project,
+        projectId: "scratch-1",
+        terminalId: "t",
+        agentId: "codex",
+      })
+    ).toBe("Only available in a project");
+    expect(scenario.lookups).toEqual([]);
+  });
+
+  it("offers the item when the lookup fails, and ignores another item's id", async () => {
+    const scenario = await setUp();
+    scenario.sessionFiles["broken"] = {
+      ok: false,
+      error: { code: "EXECUTION_ERROR", message: "boom" },
+    } as ActionDispatchResult;
+    expect(
+      await availability(scenario.host, { location: "terminal", panelId: "broken" })
+    ).toBeNull();
+    expect(scenario.lookups).toEqual(["broken"]);
+
+    scenario.sessionFile = { status: "unknown", reason: "not-observed" };
+    expect(
+      await availability(scenario.host, {
+        availability: "something-else",
+        location: "terminal",
+        panelId: "pane-codex",
+      })
+    ).toBeNull();
+    expect(scenario.lookups).toEqual(["broken"]);
   });
 });

@@ -44,7 +44,8 @@ export async function manageConversions(ctx: PluginContext, args: unknown): Prom
       ? {
           id: UNSHARE_ID,
           label: "Stop sharing with every agent in this project",
-          detail: "Only the agent that continued a session can search it",
+          detail:
+            "Only the agent that continued a session can search it, or this project's assistant for a session it continued",
         }
       : {
           id: SHARE_ID,
@@ -101,7 +102,10 @@ async function manageOne(ctx: PluginContext, record: ConversionRecord): Promise<
       {
         id: "launch",
         label: `Continue in ${target} again`,
-        detail: "Starts a new pane with the same hand-off",
+        detail:
+          record.continuedIn === "assistant"
+            ? "Starts a new assistant session with the same hand-off"
+            : "Starts a new pane with the same hand-off",
       },
       { id: "delete", label: "Delete converted session" },
     ],
@@ -135,9 +139,13 @@ async function reportDeletion(ctx: PluginContext, result: { failed: number }): P
 
 function describeConversion(record: ConversionRecord): string {
   const reach =
-    record.terminalIds.length > 0
-      ? "Searchable by the agent that continued it"
-      : "Not continued yet";
+    record.continuedIn === "assistant"
+      ? record.assistantGrant
+        ? "Searchable by this project's assistant"
+        : "Not continued yet"
+      : record.terminalIds.length > 0
+        ? "Searchable by the agent that continued it"
+        : "Not continued yet";
   return record.skippedLines > 0 ? `${reach} · ${recordCount(record.skippedLines)} skipped` : reach;
 }
 

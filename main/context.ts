@@ -11,6 +11,11 @@ export interface PluginContext {
   readonly newId: () => string;
   /** Conversions in flight, aborted when the plugin unloads. */
   readonly running: Set<AbortController>;
+  /**
+   * Assistant session starts in flight, per converted session: the project's
+   * assistant may search it meanwhile, before the start is known to succeed.
+   */
+  readonly pendingAssistantGrants: Map<string, number>;
 }
 
 /** The project in front, which is where an installed plugin's dispatch runs. */
