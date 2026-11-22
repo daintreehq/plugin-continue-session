@@ -38,17 +38,21 @@ export class SessionMismatchError extends Error {}
  * Reads the session once, from its first byte to its size at open, and builds
  * the index and the hand-off in the same pass. The file is opened read-only
  * and nothing is written next to it; the index is only moved into place once
- * the whole snapshot is in it.
+ * the whole snapshot is in it. With no store, only the hand-off is collected:
+ * the global assistant is handed no plugin tools, so an index would go unread.
  */
 export async function convertSession(
-  store: IndexStore,
+  store: IndexStore | null,
   input: ConvertInput
 ): Promise<ConvertResult> {
   const snapshot = await openSessionSnapshot(input.path);
-  const builder = await store.createBuilder(input.id).catch(async (error: unknown) => {
-    await snapshot.handle.close();
-    throw error;
-  });
+  const builder = store
+    ? await store.createBuilder(input.id).catch(async (error: unknown) => {
+        await snapshot.handle.close();
+        throw error;
+      })
+    : null;
+  let fragments = 0;
   const handoff = new HandoffCollector();
   let skippedLines = 0;
   let namedSelf = false;
@@ -71,7 +75,8 @@ export async function convertSession(
       }
       if (parsed.sidechain) continue;
       for (const fragment of parsed.fragments) {
-        builder.add(fragment.kind, fragment.text, {
+        fragments += 1;
+        builder?.add(fragment.kind, fragment.text, {
           line: line.line,
           byteOffset: line.byteOffset,
           timestamp: parsed.timestamp,
@@ -94,9 +99,9 @@ export async function convertSession(
     }
     // The last read can finish after a cancel; the index is not published then.
     input.signal.throwIfAborted();
-    await builder.finish();
+    await builder?.finish();
   } catch (error) {
-    await builder.abandon();
+    await builder?.abandon();
     throw error;
   } finally {
     await snapshot.handle.close();
@@ -104,7 +109,7 @@ export async function convertSession(
 
   return {
     sourceBytes: snapshot.bytes,
-    fragments: builder.fragments,
+    fragments: builder?.fragments ?? fragments,
     skippedLines,
     prompts: handoff.recentPrompts(),
     lastReply: handoff.lastReply(),
